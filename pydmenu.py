@@ -3,10 +3,97 @@ import sys, gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import Gtk, Gdk, GtkLayerShell, Pango
+from gi.repository import Gtk, Gdk, Gio, GtkLayerShell, Pango
 
 items = [l.rstrip("\n") for l in sys.stdin]
 matches, sel = items[:], 0
+
+
+def build_icon_map():
+    icons = {}
+    for app in Gio.AppInfo.get_all():
+        icon = app.get_icon()
+        if icon is None:
+            continue
+        items.append(app.get_name())
+        keys = {app.get_name().lower()}
+        exe = app.get_executable()
+        if exe and exe != "flatpak":  # flatpak apps all share this
+            keys.add(exe.rsplit("/", 1)[-1].lower())
+        for k in keys:
+            icons.setdefault(k, icon)  # first app wins on duplicates
+    return icons
+
+
+# need to set the correct icon theme
+ICONS = build_icon_map()
+theme = Gtk.IconTheme.get_default()
+theme.append_search_path("~/.local/share/icons/")
+theme.set_custom_theme("aero")
+
+
+def icon_for(name):
+    n = name.lower()
+    if n in ICONS:
+        return Gtk.Image.new_from_gicon(ICONS[n], Gtk.IconSize.LARGE_TOOLBAR)
+    if theme.has_icon(n):  # fallback: item text IS an icon name
+        return Gtk.Image.new_from_icon_name(n, Gtk.IconSize.LARGE_TOOLBAR)
+    return None
+
+
+CSS = b"""
+* { font-family: "Segoe UI", "Open Sans", "Noto Sans", sans-serif; font-size: 11pt; }
+
+window {
+  background: linear-gradient(to bottom, rgba(96,106,120,0.62), rgba(52,58,68,0.72));
+  border: 1px solid rgba(255,255,255,0.45);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.40),
+              inset 0 1px 0 1px rgba(255,255,255,0.18);
+}
+
+entry {
+  background: rgba(255,255,255,0.18);
+  color: #fff;
+  caret-color: #fff;
+  border: 1px solid rgba(255,255,255,0.35);
+  border-radius: 4px;
+  box-shadow: none;
+  padding: 6px 8px;
+}
+entry:focus { border-color: rgba(255,255,255,0.65); }
+
+list { background: transparent; }
+
+row {
+  background: transparent;
+  border-top: 1px ridge rgba(255, 255, 255, 0.3);
+  border-bottom: 1px ridge rgba(0, 0, 0, 0.8);
+  border-radius: 3px;
+  padding: 7px 10px;
+  outline-style: none;
+}
+row label { color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.60); }
+
+row:hover {
+  background: linear-gradient(to bottom,
+      rgba(255,255,255,0.40) 0%,
+      rgba(255,255,255,0.20) 50%,
+      rgba(255,255,255,0.04) 50%,
+      rgba(255,255,255,0.16) 100%);
+  border-color: rgba(255,255,255,0.55);
+}
+row:selected {
+  background: linear-gradient(to bottom,
+      rgba(255,255,255,0.52) 0%,
+      rgba(255,255,255,0.28) 50%,
+      rgba(255,255,255,0.06) 50%,
+      rgba(255,255,255,0.22) 100%);
+  border-color: rgba(255,255,255,0.80);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.30);
+}
+row:selected label { color: #fff; }
+"""
 
 
 def match_from(q, s, start):
@@ -50,29 +137,57 @@ win = Gtk.Window()
 GtkLayerShell.init_for_window(win)
 GtkLayerShell.set_layer(win, GtkLayerShell.Layer.TOP)
 GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.EXCLUSIVE)
-for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
-    GtkLayerShell.set_anchor(win, edge, True)
+win.set_size_request(800, 600)  # no anchors = centered on screen
+
+# Ask for an RGBA visual so the translucent CSS background actually shows.
+visual = win.get_screen().get_rgba_visual()
+if visual:
+    win.set_visual(visual)
+# win.set_app_paintable(True)
 
 css = Gtk.CssProvider()
-css.load_from_data(b"""
-window, entry { background: #222; color: #eee; border: none; box-shadow: none; }
-label { color: #8f8; }
-""")
+css.load_from_data(CSS)
 Gtk.StyleContext.add_provider_for_screen(
     Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
 )
 
-box = Gtk.Box(spacing=12)
-entry = Gtk.Entry(width_chars=20)
-out = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-box.pack_start(entry, False, False, 4)
-box.pack_start(out, True, True, 0)
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+box.set_border_width(8)
+entry = Gtk.Entry()
+listbox = Gtk.ListBox()
+listbox.set_can_focus(False)  # keep keyboard focus in the entry
+box.pack_start(entry, False, False, 0)
+box.pack_start(listbox, True, True, 0)
 win.add(box)
 
 
 def render():
-    shown = matches[sel : sel + 10]
-    out.set_text("  ".join(f"[{m}]" if i == 0 else m for i, m in enumerate(shown)))
+    for child in listbox.get_children():
+        listbox.remove(child)
+    start = max(0, sel - 14)  # scroll so the selection stays visible
+    for m in matches[start : start + 15]:
+        row = Gtk.ListBoxRow()
+        row.set_can_focus(False)
+        row.item = m  # remember the full text on the row
+
+        img = icon_for(m) or Gtk.Image()  # empty placeholder if no icon
+        img.set_pixel_size(24)
+        img.set_size_request(24, 24)  # keeps text aligned either way
+
+        hbox = Gtk.Box(spacing=10)
+        hbox.pack_start(img, False, False, 0)
+        hbox.pack_start(
+            Gtk.Label(label=m, xalign=0, ellipsize=Pango.EllipsizeMode.END),
+            True,
+            True,
+            0,
+        )
+        row.add(hbox)
+        listbox.add(row)
+    listbox.show_all()
+    rows = listbox.get_children()
+    if rows:
+        listbox.select_row(rows[sel - start])
 
 
 def refresh(*_):
@@ -92,6 +207,11 @@ def move(d):
         render()
 
 
+def on_row_activated(_, row):
+    print(row.item, flush=True)
+    Gtk.main_quit()
+
+
 def on_key(_, ev):
     k = Gdk.keyval_name(ev.keyval)
     if k == "Escape":
@@ -100,9 +220,9 @@ def on_key(_, ev):
         if matches:
             print(matches[sel], flush=True)
         Gtk.main_quit()
-    elif k in ("Right", "Tab"):
+    elif k in ("Down", "Tab"):
         move(1)
-    elif k in ("Left", "ISO_Left_Tab"):
+    elif k in ("Up", "ISO_Left_Tab"):
         move(-1)
     else:
         return False
@@ -110,6 +230,7 @@ def on_key(_, ev):
 
 
 entry.connect("changed", refresh)
+listbox.connect("row-activated", on_row_activated)
 win.connect("key-press-event", on_key)
 win.connect("destroy", Gtk.main_quit)
 refresh()
